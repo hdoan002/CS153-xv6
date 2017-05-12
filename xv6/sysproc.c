@@ -46,8 +46,11 @@ int
 sys_setpriority(void)
 {
   int priority;
-  argint(0, &priority);
-  return setpriority(priority);
+  if(argint(0, &priority) < 0) {
+    return 1;
+  }
+  setpriority(priority);
+  return 0;
 }
 
 int

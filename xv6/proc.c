@@ -182,7 +182,7 @@ fork(void)
 
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
-// until its parent calls wait() to find out it exited.
+// until its parent calls wait(0) to find out it exited.
 void
 exit(int status)
 {
@@ -207,7 +207,7 @@ exit(int status)
 
   acquire(&ptable.lock);
 
-  // Parent might be sleeping in wait().
+  // Parent might be sleeping in wait(0).
   wakeup1(proc->parent);
 
   // Pass abandoned children to init.
@@ -277,45 +277,48 @@ wait(int *status)
 int
 waitpid(int pid, int *status, int options) {
   struct proc *p;
-  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-    if(p->pid == pid) {
-      if(p->state == ZOMBIE){
-        // Found one.
-        pid = p->pid;
-        kfree(p->kstack);
-        p->kstack = 0;
-        freevm(p->pgdir);
-        p->pid = 0;
-        p->parent = 0;
-        p->name[0] = 0;
-        p->killed = 0;
-        p->state = UNUSED;
-        release(&ptable.lock);
-        if(status == 0) {
-          return pid;
-        }
-        *status = p->status;
-        return pid;
+  
+  acquire(&ptable.lock);
+  for(;;){
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->pid == pid) {
+	if(p->state == ZOMBIE){
+	  // Found one.
+	  pid = p->pid;
+	  kfree(p->kstack);
+	  p->kstack = 0;
+	  freevm(p->pgdir);
+	  p->pid = 0;
+	  p->parent = 0;
+	  p->name[0] = 0;
+	  p->killed = 0;
+	  p->state = UNUSED;
+	  release(&ptable.lock);
+	  if(status == 0) {
+	    return pid;
+	  }
+	  *status = p->status;
+	  return pid;
+	}
       }
     }
   }
+
+  release(&ptable.lock);
+  sleep(proc, &ptable.lock);
   return pid;
 }
 
 
-int
+void
 setpriority(int priority) {
-  struct proc *p;
-  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-    if(priority < 0) {
-      p->priority = 0;
-    }
-    if(priority > 63) {
-      p->priority = 63;
-    }
-    p->priority = priority;
+  if(priority < 0) {
+    proc->priority = 0;
   }
-  return 0;
+  if(priority > 63) {
+    proc->priority = 63;
+  }
+  proc->priority = priority;
 }
 
 
@@ -332,36 +335,42 @@ scheduler(void)
 {
 
   struct proc *p;
-  struct proc *highest = ptable.proc;
-  int temp = 63;
-    
+      
   for(;;){
     // Enable interrupts on this processor.
     sti();
+    
+    int max = 63;
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(temp >= p->priority) {
-        temp = p->priority;
-        highest = p;
+      if(p->state != RUNNABLE)
+        continue;
+      
+      if(p->priority < max) {
+	max = p->priority;
       }
     }
-    // Switch to chosen process.  It is the process's job
-    // to release ptable.lock and then reacquire it
-    // before jumping back to us.
-    proc = highest;
-    switchuvm(highest);
-    highest->state = RUNNING;
-    swtch(&cpu->scheduler, highest->context);
-    switchkvm();
 
-    // Process is done running for now.
-    // It should have changed its p->state before coming back.
-    proc = 0;
-    
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+	continue;
+      if(max == p->priority) {
+	proc = p;
+	switchuvm(p);
+	p->state = RUNNING;
+	swtch(&cpu->scheduler, p->context);
+	switchkvm();
 
+	// Process is done running for now.
+	// It should have changed its p->state before coming back.
+	proc = 0;
+      }
+    }
     release(&ptable.lock);
+
+     
   }
 
 /*
